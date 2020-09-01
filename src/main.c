@@ -20,12 +20,15 @@
 #include <dfu/mcuboot.h>
 #include <modem/lte_lc.h>
 #include <modem/bsdlib.h>
+#include <modem/at_cmd.h>
+#include <modem/at_notif.h>
+#include <modem/modem_info.h>
 #include <bsd.h>
 
 static struct k_delayed_work read_sensor_data_work;
 K_SEM_DEFINE(lte_connected, 0, 1);
 
-uint8_t interval = 10;
+uint16_t sensorUpdateIntervalSeconds = 10;
 double threshold = 24;
 bool isOn = true;
 #define RELAY_PIN 17
@@ -72,7 +75,12 @@ static void read_sensor_data_work_fn(struct k_work *work)
 		if (rc != 0) {
 			printf("get failed: %d\n", rc);
 		} else {
-			printf("Temp: %.1f\n", sensor_value_to_double(&temperature));
+			int64_t now;
+			int dtError = date_time_now(&now);
+			if (dtError) {
+				printk("date_time_now, error: %d\n", dtError);
+			}
+			printf("[%lld] Temp: %.1f\n", now, sensor_value_to_double(&temperature));
 		}
 		if (sensor_value_to_double(&temperature) < threshold) {
 			if (isOn) {
@@ -90,9 +98,9 @@ static void read_sensor_data_work_fn(struct k_work *work)
 	gpio_pin_set(dev, RELAY_PIN, (int)(!isOn));
 	dk_set_led(DK_LED2, 0); // LED2 off
 
-	printk("Next sensor read in %d seconds\n", interval);
+	printk("Next sensor read in %d seconds\n", sensorUpdateIntervalSeconds);
 
-	k_delayed_work_submit(&read_sensor_data_work, K_SECONDS(interval));
+	k_delayed_work_submit(&read_sensor_data_work, K_SECONDS(sensorUpdateIntervalSeconds));
 }
 
 void aws_iot_event_handler(const struct aws_iot_evt *const evt)
@@ -277,7 +285,7 @@ static void bsd_lib_modem_dfu_handler(void)
 static void work_init(void)
 {
 	k_delayed_work_init(&read_sensor_data_work, read_sensor_data_work_fn);
-	k_delayed_work_submit(&read_sensor_data_work, K_NO_WAIT);
+	k_delayed_work_submit(&read_sensor_data_work, K_SECONDS(15));
 }
 
 void main(void) {
@@ -302,7 +310,7 @@ void main(void) {
 	dk_set_led(DK_LED4, 0); // LED3 static off
 
 	printf("Version: %s\n", CONFIG_APP_VERSION);
-	printf("Reading temperature every %d seconds\n", interval);
+	printf("Reading temperature every %d seconds\n", sensorUpdateIntervalSeconds);
 	printf("Temperature threshold: %d\n", (int)threshold);
 
 	cJSON_Init();
@@ -326,4 +334,13 @@ void main(void) {
 	}
 
 	k_sem_take(&lte_connected, K_FOREVER);
+
+	date_time_update_async();
+
+	printf("Connecting to AWS IoT...\n");
+
+	err = aws_iot_connect(NULL);
+	if (err) {
+		printk("aws_iot_connect failed: %d\n", err);
+	}
 }
