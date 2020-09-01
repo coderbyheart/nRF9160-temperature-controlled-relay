@@ -9,8 +9,11 @@
 #include <drivers/sensor.h>
 #include <drivers/gpio.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <devicetree.h>
 #include <dk_buttons_and_leds.h>
+#include <cJSON.h>
+#include <cJSON_os.h>
 
 static struct k_delayed_work read_sensor_data_work;
 
@@ -112,6 +115,8 @@ void main(void) {
 	printf("Version: %s\n", CONFIG_APP_VERSION);
 	printf("Reading temperature every %d seconds\n", interval);
 	printf("Temperature threshold: %d\n", (int)threshold);
+
+	cJSON_Init();
 
 	work_init();
 }
