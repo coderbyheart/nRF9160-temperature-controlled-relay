@@ -12,8 +12,12 @@
 #include <devicetree.h>
 #include <dk_buttons_and_leds.h>
 
+static struct k_delayed_work read_sensor_data_work;
+
 uint8_t interval = 10;
 double threshold = 24;
+bool isOn = true;
+#define RELAY_PIN 17
 
 static void button_handler(uint32_t button_states, uint32_t has_changed)
 {
@@ -27,8 +31,10 @@ static void button_handler(uint32_t button_states, uint32_t has_changed)
 	}
 }
 
-void main(void) {
-	bool isOn = true;
+static void read_sensor_data_work_fn(struct k_work *work)
+{
+	dk_set_led(DK_LED2, 1); // LED2 on while working
+
 	// Initialize DHT sensor
 	const char *const label = DT_LABEL(DT_INST(0, aosong_dht));
 	struct device *dht22 = device_get_binding(label);
@@ -37,13 +43,54 @@ void main(void) {
 		return;
 	}
 
-	// Initialize GPIO
+	// Initialize GPIO for Relay
 	struct device *dev = device_get_binding("GPIO_0");
 	if (!dev) {
 		printf("Failed get binding for GPIO_0!\n");
 		return;
 	}
+	gpio_pin_configure(dev, RELAY_PIN, GPIO_OUTPUT);
+	
+	int rc = sensor_sample_fetch(dht22);
+	if (rc != 0) {
+		printf("Sensor fetch failed: %d\n", rc);
+		isOn = true; // Safety fallback
+	} else {
+		struct sensor_value temperature;
+		rc = sensor_channel_get(dht22, SENSOR_CHAN_AMBIENT_TEMP, &temperature);
+		if (rc != 0) {
+			printf("get failed: %d\n", rc);
+		} else {
+			printf("Temp: %.1f\n", sensor_value_to_double(&temperature));
+		}
+		if (sensor_value_to_double(&temperature) < threshold) {
+			if (isOn) {
+				printf("Turning off...\n");
+			}
+			isOn = false;
+		} else {
+			if (!isOn) {
+				printf("Turning on...\n");
+			}
+			isOn = true;
+		}
+	}
+	dk_set_led(DK_LED1, (int)isOn); // LED1 status
+	gpio_pin_set(dev, RELAY_PIN, (int)(!isOn));
+	dk_set_led(DK_LED2, 0); // LED2 off
 
+	printk("Next sensor read in %d seconds\n", interval);
+
+	k_delayed_work_submit(&read_sensor_data_work, K_SECONDS(interval));
+}
+
+static void work_init(void)
+{
+	k_delayed_work_init(&read_sensor_data_work, read_sensor_data_work_fn);
+	k_delayed_work_submit(&read_sensor_data_work, K_NO_WAIT);
+}
+
+void main(void) {
 	// Initialize Buttons
 	int buttonError = dk_buttons_init(button_handler);
 	if (buttonError != 0) {
@@ -58,9 +105,6 @@ void main(void) {
 		return;
 	}
 
-	// PIN for Relay
-	gpio_pin_configure(dev, 17, GPIO_OUTPUT);
-
 	// LEDs
 	dk_set_led(DK_LED3, 0); // LED3 static off
 	dk_set_led(DK_LED4, 0); // LED3 static off
@@ -69,35 +113,5 @@ void main(void) {
 	printf("Reading temperature every %d seconds\n", interval);
 	printf("Temperature threshold: %d\n", (int)threshold);
 
-	while (true) {
-		dk_set_led(DK_LED2, 1); // LED2 on while not sleeping
-		int rc = sensor_sample_fetch(dht22);
-		if (rc != 0) {
-			printf("Sensor fetch failed: %d\n", rc);
-			isOn = true; // Safety fallback
-		} else {
-			struct sensor_value temperature;
-			rc = sensor_channel_get(dht22, SENSOR_CHAN_AMBIENT_TEMP, &temperature);
-			if (rc != 0) {
-				printf("get failed: %d\n", rc);
-			} else {
-				printf("Temp: %.1f\n", sensor_value_to_double(&temperature));
-			}
-			if (sensor_value_to_double(&temperature) < threshold) {
-				if (isOn) {
-					printf("Turning off...\n");
-				}
-				isOn = false;
-			} else {
-				if (!isOn) {
-					printf("Turning on...\n");
-				}
-				isOn = true;
-			}
-		}
-		dk_set_led(DK_LED1, (int)isOn); // LED1 status
-		gpio_pin_set(dev, 17, (int)(!isOn));
-		dk_set_led(DK_LED2, 0); // LED2 off
-		k_sleep(K_SECONDS(interval));
-	}
+	work_init();
 }
