@@ -6,15 +6,11 @@
 
 menu "Temperature controlled relay"
 
-menu "Firmware versioning"
-
 config APP_VERSION
 	string "The application version"
 	default "0.0.0-development"
 
 endmenu # Firmware versioning
-
-endmenu
 
 menu "Zephyr Kernel"
 source "$ZEPHYR_BASE/Kconfig.zephyr"
