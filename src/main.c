@@ -67,7 +67,7 @@ void main(void) {
 
 	printf("Version: %s\n", CONFIG_APP_VERSION);
 	printf("Reading temperature every %d seconds\n", interval);
-	printf("Threshold: %d\n", (int)threshold);
+	printf("Temperature threshold: %d\n", (int)threshold);
 
 	while (true) {
 		dk_set_led(DK_LED2, 1); // LED2 on while not sleeping
