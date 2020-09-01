@@ -97,9 +97,7 @@ static void read_sensor_data_work_fn(struct k_work *work)
 	dk_set_led(DK_LED1, (int)isOn); // LED1 status
 	gpio_pin_set(dev, RELAY_PIN, (int)(!isOn));
 	dk_set_led(DK_LED2, 0); // LED2 off
-
-	printk("Next sensor read in %d seconds\n", sensorUpdateIntervalSeconds);
-
+	// Schedule next read
 	k_delayed_work_submit(&read_sensor_data_work, K_SECONDS(sensorUpdateIntervalSeconds));
 }
 
@@ -317,10 +315,9 @@ void main(void) {
 
 	bsd_lib_modem_dfu_handler();
 
-	err = aws_iot_init(NULL, aws_iot_event_handler);
-	if (err) {
-		printk("AWS IoT library could not be initialized, error: %d\n", err);
-		return;
+	int awsErr = aws_iot_init(NULL, aws_iot_event_handler);
+	if (awsErr) {
+		printk("AWS IoT library could not be initialized, error: %d\n", awsErr);
 	}
 
 	work_init();
@@ -339,8 +336,10 @@ void main(void) {
 
 	printf("Connecting to AWS IoT...\n");
 
-	err = aws_iot_connect(NULL);
-	if (err) {
-		printk("aws_iot_connect failed: %d\n", err);
+	if (!awsErr) {
+		err = aws_iot_connect(NULL);
+		if (err) {
+			printk("aws_iot_connect failed: %d\n", err);
+		}
 	}
 }
