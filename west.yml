@@ -6,7 +6,7 @@ manifest:
     - name: sdk-nrf
       path: nrf
       remote: nordic
-      revision: 0ffe5bc27deabfccacb40d5876c3fbe0567337e1
+      revision: allow-client-id-with-max-length
       import: true
   self:
     path: tcr
