@@ -30,8 +30,13 @@ K_SEM_DEFINE(lte_connected, 0, 1);
 
 uint16_t sensorUpdateIntervalSeconds = 10;
 double threshold = 24;
-bool isOn = true;
 #define RELAY_PIN 17
+#define ON_STRING "On"
+#define OFF_STRING "Off"
+
+bool isOn = true;
+uint16_t sensorErrorCount = 0;
+uint16_t maxSensorErrorCount = 3;
 
 static void button_handler(uint32_t button_states, uint32_t has_changed)
 {
@@ -68,8 +73,14 @@ static void read_sensor_data_work_fn(struct k_work *work)
 	int rc = sensor_sample_fetch(dht22);
 	if (rc != 0) {
 		printf("Sensor fetch failed: %d\n", rc);
-		isOn = true; // Safety fallback
+		sensorErrorCount += 1;
+		printf("Error count: %d\n", sensorErrorCount);
+		if (sensorErrorCount > maxSensorErrorCount) {
+			isOn = true; // Safety fallback
+			printf("Safety fallback triggered.\n");
+		}
 	} else {
+		sensorErrorCount = 0;
 		struct sensor_value temperature;
 		rc = sensor_channel_get(dht22, SENSOR_CHAN_AMBIENT_TEMP, &temperature);
 		if (rc != 0) {
@@ -80,7 +91,7 @@ static void read_sensor_data_work_fn(struct k_work *work)
 			if (dtError) {
 				printk("date_time_now, error: %d\n", dtError);
 			}
-			printf("[%lld] Temp: %.1f\n", now, sensor_value_to_double(&temperature));
+			printf("[%lld] Temp: %.1f | Threshold: %.1f | Status: %s\n", now, sensor_value_to_double(&temperature), threshold, isOn ? ON_STRING : OFF_STRING);
 		}
 		if (sensor_value_to_double(&temperature) < threshold) {
 			if (isOn) {
@@ -109,6 +120,7 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt)
 		break;
 	case AWS_IOT_EVT_CONNECTED:
 		printk("AWS_IOT_EVT_CONNECTED\n");
+		dk_set_led(DK_LED3, 1); // LED3 on while connected
 
 		if (evt->data.persistent_session) {
 			printk("Persistent session enabled\n");
@@ -140,6 +152,7 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt)
 	case AWS_IOT_EVT_DISCONNECTED:
 		printk("AWS_IOT_EVT_DISCONNECTED\n");
 		// k_delayed_work_cancel(&shadow_update_work);
+		dk_set_led(DK_LED3, 0); // LED3 off while connected
 		break;
 	case AWS_IOT_EVT_DATA_RECEIVED:
 		printk("AWS_IOT_EVT_DATA_RECEIVED\n");
@@ -227,17 +240,9 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 
 static void modem_configure(void)
 {
-	int err;
-
-	if (IS_ENABLED(CONFIG_LTE_AUTO_INIT_AND_CONNECT)) {
-		/* Do nothing, modem is already configured and LTE connected. */
-	} else {
-		err = lte_lc_init_and_connect_async(lte_handler);
-		if (err) {
-			printk("Modem could not be configured, error: %d\n",
-				err);
-			return;
-		}
+	int err = lte_lc_init_and_connect_async(lte_handler);
+	if (err) {
+		printk("Modem could not be configured, error: %d\n", err);
 	}
 }
 
@@ -303,24 +308,26 @@ void main(void) {
 		return;
 	}
 
-	// LEDs
-	dk_set_led(DK_LED3, 0); // LED3 static off
-	dk_set_led(DK_LED4, 0); // LED3 static off
-
-	printf("Version: %s\n", CONFIG_APP_VERSION);
-	printf("Reading temperature every %d seconds\n", sensorUpdateIntervalSeconds);
-	printf("Temperature threshold: %d\n", (int)threshold);
+	printf("##########################################################################################\n");
+	printf("Version:                   %s\n", CONFIG_APP_VERSION);
+	printf("Temperature read interval: %d seconds\n", sensorUpdateIntervalSeconds);
+	printf("Max sensor read error:     %d\n", maxSensorErrorCount);
+	printf("Temperature threshold:     %d\n", (int)threshold);
+	printf("AWS IoT Client ID:         %s\n", CONFIG_AWS_IOT_CLIENT_ID_STATIC);
+	printf("AWS IoT broker hostname:   %s\n", CONFIG_AWS_IOT_BROKER_HOST_NAME);
+	printf("##########################################################################################\n");
 
 	cJSON_Init();
 
 	bsd_lib_modem_dfu_handler();
 
+	work_init();
+
 	int awsErr = aws_iot_init(NULL, aws_iot_event_handler);
 	if (awsErr) {
 		printk("AWS IoT library could not be initialized, error: %d\n", awsErr);
+		return;
 	}
-
-	work_init();
 
 	modem_configure();
 
@@ -333,13 +340,13 @@ void main(void) {
 	k_sem_take(&lte_connected, K_FOREVER);
 
 	date_time_update_async();
-
+	// Sleep to ensure that time has been obtained before communication with AWS IoT.
+	printf("Waiting 15 seconds before attempting to connect...\n");
+	k_sleep(K_SECONDS(15));
+	
 	printf("Connecting to AWS IoT...\n");
-
-	if (!awsErr) {
-		err = aws_iot_connect(NULL);
-		if (err) {
-			printk("aws_iot_connect failed: %d\n", err);
-		}
+	err = aws_iot_connect(NULL);
+	if (err) {
+		printk("aws_iot_connect failed: %d\n", err);
 	}
 }

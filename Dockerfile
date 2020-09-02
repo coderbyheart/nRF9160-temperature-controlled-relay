@@ -9,3 +9,10 @@ RUN \
     pip3 install -r nrf/scripts/requirements.txt && \
     pip3 install -r bootloader/mcuboot/scripts/requirements.txt && \
     rm -rf /workdir/ncs/tcr
+# Pull in https://github.com/nrfconnect/sdk-nrfxlib/pull/250
+RUN \
+    cd /workdir/ncs/nrfxlib && \
+        git remote add evenl https://github.com/evenl/nrfxlib.git && \
+        git fetch evenl && \
+        git checkout -t evenl/bsdlib_release_0.7.9
+        

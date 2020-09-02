@@ -12,11 +12,11 @@ This implements a temperature controlled relay using the nRF9160 DK:
 
 ### Prepare the Docker image with all build dependencies
 
-    docker build -t tcr-docker .
+    docker build -t sdk-nrf-tcr .
 
 ### Build the firmware
 
-    docker run --rm -v ${PWD}:/workdir/ncs/tcr tcr-docker \
+    docker run --rm -v ${PWD}:/workdir/ncs/tcr sdk-nrf-tcr \
         /bin/bash -c 'cd /workdir/ncs/tcr && west build -p always -b nrf9160dk_nrf9160ns'
 
 ### Flash the firmware
