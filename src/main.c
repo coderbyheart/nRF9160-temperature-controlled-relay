@@ -26,27 +26,50 @@
 #include <bsd.h>
 
 static struct k_delayed_work read_sensor_data_work;
+static struct k_delayed_work report_state_work;
+
 K_SEM_DEFINE(lte_connected, 0, 1);
 
 uint16_t sensorUpdateIntervalSeconds = 10;
+uint16_t cloudPublishIntervalSeconds = 60;
+double cloudPublishThreshold = 0.1;
 double threshold = 24;
+double currentTemperature;
+int64_t currentTemperatureTs;
 #define RELAY_PIN 17
-#define ON_STRING "On"
-#define OFF_STRING "Off"
 
-bool isOn = true;
+bool switchState = true;
+int64_t switchStateTs;
 uint16_t sensorErrorCount = 0;
 uint16_t maxSensorErrorCount = 3;
 
+#define MIN_VALID_TS 1500000000000
+
+bool reportedVersion = false;
+double reportedCurrentTemperature = -127;
+double reportedThreshold = -127;
+bool reportedSwitchState = false;
+
 static void button_handler(uint32_t button_states, uint32_t has_changed)
 {
+	bool triggerPublication = false;
 	if ((has_changed & button_states & DK_BTN1_MSK)) {
 		threshold = threshold - 1;
 		printf("Button - pressed: Threshold is now %d\n", (int)threshold);
+		triggerPublication = true;
 	}
 	if ((has_changed & button_states & DK_BTN2_MSK)) {
 		threshold = threshold + 1;
 		printf("Button + pressed: Threshold is now %d\n", (int)threshold);
+		triggerPublication = true;
+	}
+	if (triggerPublication) {
+		// Trigger sensor read
+		k_delayed_work_cancel(&read_sensor_data_work);
+		k_delayed_work_submit(&read_sensor_data_work, K_SECONDS(1));
+		// Sensor read might cancel this, but if not, schedule report of new threshold
+		k_delayed_work_cancel(&report_state_work);
+		k_delayed_work_submit(&report_state_work, K_SECONDS(5));
 	}
 }
 
@@ -69,57 +92,219 @@ static void read_sensor_data_work_fn(struct k_work *work)
 		return;
 	}
 	gpio_pin_configure(dev, RELAY_PIN, GPIO_OUTPUT);
+
+	int dtError = date_time_now(&currentTemperatureTs);
+	if (dtError) {
+		printk("Failed to get current time: error %d\n", dtError);
+	}
 	
 	int rc = sensor_sample_fetch(dht22);
 	if (rc != 0) {
 		printf("Sensor fetch failed: %d\n", rc);
 		sensorErrorCount += 1;
-		printf("Error count: %d\n", sensorErrorCount);
+		printf("Sensor fetch error count: %d\n", sensorErrorCount);
 		if (sensorErrorCount > maxSensorErrorCount) {
-			isOn = true; // Safety fallback
+			switchState = true; // Safety fallback
+			switchStateTs = currentTemperatureTs;
 			printf("Safety fallback triggered.\n");
 		}
 	} else {
+		bool triggerPublication = false;
 		sensorErrorCount = 0;
 		struct sensor_value temperature;
 		rc = sensor_channel_get(dht22, SENSOR_CHAN_AMBIENT_TEMP, &temperature);
 		if (rc != 0) {
 			printf("get failed: %d\n", rc);
 		} else {
-			int64_t now;
-			int dtError = date_time_now(&now);
-			if (dtError) {
-				printk("date_time_now, error: %d\n", dtError);
-			}
-			printf("[%lld] Temp: %.1f | Threshold: %.1f | Status: %s\n", now, sensor_value_to_double(&temperature), threshold, isOn ? ON_STRING : OFF_STRING);
+			currentTemperature = sensor_value_to_double(&temperature);
 		}
-		if (sensor_value_to_double(&temperature) < threshold) {
-			if (isOn) {
+		if (currentTemperature < threshold) {
+			if (switchState) {
 				printf("Turning off...\n");
+				switchStateTs = currentTemperatureTs;
+				switchState = false;
+				triggerPublication = true;
 			}
-			isOn = false;
 		} else {
-			if (!isOn) {
+			if (!switchState) {
 				printf("Turning on...\n");
+				switchStateTs = currentTemperatureTs;
+				switchState = true;
+				triggerPublication = true;
 			}
-			isOn = true;
 		}
+		if (triggerPublication) {
+			k_delayed_work_cancel(&report_state_work);
+			k_delayed_work_submit(&report_state_work, K_SECONDS(1));
+		}
+		printf("[%lld] Temp: %.1f | Threshold: %.1f | Switch: %s\n", currentTemperatureTs, currentTemperature, threshold, switchState ? "On" : "Off");
 	}
-	dk_set_led(DK_LED1, (int)isOn); // LED1 status
-	gpio_pin_set(dev, RELAY_PIN, (int)(!isOn));
+	dk_set_led(DK_LED1, (int)switchState); // LED1 status
+	gpio_pin_set(dev, RELAY_PIN, (int)(!switchState));
 	dk_set_led(DK_LED2, 0); // LED2 off
 	// Schedule next read
 	k_delayed_work_submit(&read_sensor_data_work, K_SECONDS(sensorUpdateIntervalSeconds));
 }
 
+static int json_add_obj(cJSON *parent, const char *str, cJSON *object)
+{
+	cJSON_AddItemToObject(parent, str, object);
+
+	return 0;
+}
+
+static int json_add_str(cJSON *parent, const char *str, const char *value)
+{
+	cJSON *json_str = cJSON_CreateString(value);
+	if (json_str == NULL) {
+		return -ENOMEM;
+	}
+
+	return json_add_obj(parent, str, json_str);
+}
+
+static int json_add_number(cJSON *parent, const char *str, double value)
+{
+	cJSON *json_num = cJSON_CreateNumber(value);
+	if (json_num == NULL) {
+		return -ENOMEM;
+	}
+
+	return json_add_obj(parent, str, json_num);
+}
+
+static int json_add_boolean(cJSON *parent, const char *str, bool value)
+{
+	cJSON *b = value ? cJSON_CreateTrue() : cJSON_CreateFalse();
+	if (b == NULL) {
+		return -ENOMEM;
+	}
+
+	return json_add_obj(parent, str, b);
+}
+
+static int report_state()
+{
+	int err;
+	char *message;
+
+	cJSON *root_obj = cJSON_CreateObject();
+	cJSON *state_obj = cJSON_CreateObject();
+	cJSON *reported_obj = cJSON_CreateObject();
+
+	if (root_obj == NULL || state_obj == NULL || reported_obj == NULL) {
+		cJSON_Delete(root_obj);
+		cJSON_Delete(state_obj);
+		cJSON_Delete(reported_obj);
+		err = -ENOMEM;
+		return err;
+	}
+
+	err = 0;
+
+	if (!reportedVersion) {
+		err += json_add_str(reported_obj, "app_version", CONFIG_APP_VERSION);
+	}
+
+	bool pendingReportedSwitchState = switchState;
+	if (reportedSwitchState != pendingReportedSwitchState) {
+		err += json_add_boolean(reported_obj, "switchState", pendingReportedSwitchState);
+		if (switchStateTs > MIN_VALID_TS) {
+			err += json_add_number(reported_obj, "switchStateTs", switchStateTs);
+		}
+	}
+
+	double pendingReportedCurrentTemperature = currentTemperature;
+	if (reportedCurrentTemperature != pendingReportedCurrentTemperature) {
+		err += json_add_number(reported_obj, "temp", pendingReportedCurrentTemperature);
+		if (currentTemperatureTs > MIN_VALID_TS) {
+			err += json_add_number(reported_obj, "tempTs", currentTemperatureTs);
+		}
+	}
+
+	double pendingReportedThreshold = threshold;
+	if (reportedThreshold != pendingReportedThreshold) {
+		err += json_add_number(reported_obj, "threshold", pendingReportedThreshold);
+	}
+
+	err += json_add_obj(state_obj, "reported", reported_obj);
+	err += json_add_obj(root_obj, "state", state_obj);
+
+	if (err < 0) {
+		printk("json_add, error: %d\n", err);
+		goto cleanup;
+	}
+
+	message = cJSON_Print(root_obj);
+	if (message == NULL) {
+		printk("cJSON_Print, error: returned NULL\n");
+		err = -ENOMEM;
+		goto cleanup;
+	}
+
+	struct aws_iot_data tx_data = {
+		.qos = MQTT_QOS_0_AT_MOST_ONCE,
+		.topic.type = AWS_IOT_SHADOW_TOPIC_UPDATE,
+		.ptr = message,
+		.len = strlen(message)
+	};
+
+	printk("Publishing: %s to AWS IoT broker\n", message);
+
+	err = aws_iot_send(&tx_data);
+	if (err) {
+		printk("aws_iot_send, error: %d\n", err);
+	} else {
+		reportedVersion = true;
+		reportedSwitchState = pendingReportedSwitchState;
+		reportedCurrentTemperature = pendingReportedCurrentTemperature;
+		reportedThreshold = pendingReportedThreshold;
+	}
+
+	k_free(message);
+
+cleanup:
+
+	cJSON_Delete(root_obj);
+
+	return err;
+}
+
+static bool needsPublish() {
+	if (!reportedVersion) return true;
+	if (reportedSwitchState != switchState) return true;
+	if (reportedThreshold != threshold) return true;
+	if (reportedCurrentTemperature > currentTemperature && reportedCurrentTemperature - currentTemperature > cloudPublishThreshold) return true;
+	if (reportedCurrentTemperature < currentTemperature && currentTemperature - reportedCurrentTemperature > cloudPublishThreshold) return true;
+	return false;
+}
+
+static void report_state_work_fn(struct k_work *work)
+{
+	if (!needsPublish()) {
+		printk("No updates to report.\n");
+	} else {
+		int err;
+		err = report_state();
+		if (err) {
+			printk("report_state, error: %d\n", err);
+		}
+	}
+
+	// Schedule next publication
+	k_delayed_work_submit(&report_state_work, K_SECONDS(cloudPublishIntervalSeconds));
+}
+
 void aws_iot_event_handler(const struct aws_iot_evt *const evt)
 {
+	int err;
+
 	switch (evt->type) {
 	case AWS_IOT_EVT_CONNECTING:
-		printk("AWS_IOT_EVT_CONNECTING\n");
+		printf("Connecting to AWS IoT...\n");
 		break;
 	case AWS_IOT_EVT_CONNECTED:
-		printk("AWS_IOT_EVT_CONNECTED\n");
+		printf("Connected to AWS IoT.\n");
 		dk_set_led(DK_LED3, 1); // LED3 on while connected
 
 		if (evt->data.persistent_session) {
@@ -134,24 +319,20 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt)
 		/** Send version number to AWS IoT broker to verify that the
 		 *  FOTA update worked.
 		 */
-		// k_delayed_work_submit(&shadow_update_version_work, K_NO_WAIT);
+		k_delayed_work_submit(&report_state_work, K_NO_WAIT);
 
-		/** Start sequential shadow data updates.
-		 */
-		// k_delayed_work_submit(&shadow_update_work, K_SECONDS(CONFIG_PUBLICATION_INTERVAL_SECONDS));
-
-		int err = lte_lc_psm_req(true);
+		err = lte_lc_psm_req(true);
 		if (err) {
 			printk("Requesting PSM failed, error: %d\n", err);
 		}
 
 		break;
 	case AWS_IOT_EVT_READY:
-		printk("AWS_IOT_EVT_READY\n");
+		// Ignore
 		break;
 	case AWS_IOT_EVT_DISCONNECTED:
-		printk("AWS_IOT_EVT_DISCONNECTED\n");
-		// k_delayed_work_cancel(&shadow_update_work);
+		printf("Disconnected from AWS IoT.\n");
+		k_delayed_work_cancel(&report_state_work);
 		dk_set_led(DK_LED3, 0); // LED3 off while connected
 		break;
 	case AWS_IOT_EVT_DATA_RECEIVED:
@@ -225,9 +406,7 @@ static void lte_handler(const struct lte_lc_evt *const evt)
 		break;
 	}
 	case LTE_LC_EVT_RRC_UPDATE:
-		printk("RRC mode: %s\n",
-			evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED ?
-			"Connected" : "Idle");
+		// printk("RRC mode: %s\n", evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED ? "Connected" : "Idle");
 		break;
 	case LTE_LC_EVT_CELL_UPDATE:
 		printk("LTE cell changed: Cell ID: %d, Tracking area: %d\n",
@@ -289,6 +468,7 @@ static void work_init(void)
 {
 	k_delayed_work_init(&read_sensor_data_work, read_sensor_data_work_fn);
 	k_delayed_work_submit(&read_sensor_data_work, K_SECONDS(15));
+	k_delayed_work_init(&report_state_work, report_state_work_fn);
 }
 
 void main(void) {
@@ -312,9 +492,11 @@ void main(void) {
 	printf("Version:                   %s\n", CONFIG_APP_VERSION);
 	printf("Temperature read interval: %d seconds\n", sensorUpdateIntervalSeconds);
 	printf("Max sensor read error:     %d\n", maxSensorErrorCount);
-	printf("Temperature threshold:     %d\n", (int)threshold);
+	printf("Temperature threshold:     %d degree\n", (int)threshold);
 	printf("AWS IoT Client ID:         %s\n", CONFIG_AWS_IOT_CLIENT_ID_STATIC);
 	printf("AWS IoT broker hostname:   %s\n", CONFIG_AWS_IOT_BROKER_HOST_NAME);
+	printf("Publish min interval:      %d seconds\n", cloudPublishIntervalSeconds);
+	printf("Publish threshold:         %.1f degree\n", cloudPublishThreshold);
 	printf("##########################################################################################\n");
 
 	cJSON_Init();
@@ -331,12 +513,12 @@ void main(void) {
 
 	modem_configure();
 
+	printk("Initializing modem ...\n");
 	err = modem_info_init();
 	if (err) {
 		printk("Failed initializing modem info module, error: %d\n",
 			err);
 	}
-
 	k_sem_take(&lte_connected, K_FOREVER);
 
 	date_time_update_async();
@@ -344,7 +526,6 @@ void main(void) {
 	printf("Waiting 15 seconds before attempting to connect...\n");
 	k_sleep(K_SECONDS(15));
 	
-	printf("Connecting to AWS IoT...\n");
 	err = aws_iot_connect(NULL);
 	if (err) {
 		printk("aws_iot_connect failed: %d\n", err);

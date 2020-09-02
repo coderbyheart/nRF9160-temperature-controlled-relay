@@ -5,7 +5,7 @@ This implements a temperature controlled relay using the nRF9160 DK:
 - temperature is measured via a DHT sensor (AM2302)
 - a relay is switched on, if the temperature is below a threshold
 - the threshold can be increased/decreased by pressing button 2/1
-- (TODO) publish temperature to cloud
+- it publishes the temperature to the cloud
 - (TODO) read threshold from cloud
 
 ## Building
