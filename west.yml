@@ -6,7 +6,7 @@ manifest:
     - name: sdk-nrf
       path: nrf
       remote: nordic
-      revision: allow-client-id-with-max-length
+      revision: AWS_IOT_EVT_READY-after-subscribe
       import: true
   self:
     path: tcr

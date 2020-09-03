@@ -10,6 +10,14 @@ config APP_VERSION
 	string "The application version"
 	default "0.0.0-development"
 
+config DEFAULT_THRESHOLD
+	int "Default temperature threshold in degree"
+	default 24
+
+config RELAY_PIN
+	int "PIN where relay is connected"
+	default 17
+
 endmenu # Firmware versioning
 
 menu "Zephyr Kernel"

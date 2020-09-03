@@ -25,42 +25,47 @@
 #include <modem/modem_info.h>
 #include <bsd.h>
 
+#include "cloud.h"
+
 static struct k_delayed_work read_sensor_data_work;
 static struct k_delayed_work report_state_work;
 
 K_SEM_DEFINE(lte_connected, 0, 1);
 
-uint16_t sensorUpdateIntervalSeconds = 10;
-uint16_t cloudPublishIntervalSeconds = 60;
-double cloudPublishThreshold = 0.1;
-double threshold = 24;
-double currentTemperature;
-int64_t currentTemperatureTs;
-#define RELAY_PIN 17
+uint16_t sensorUpdateIntervalSeconds = 10; // TODO: Make configurable
+uint16_t cloudPublishIntervalSeconds = 60; // TODO: Make configurable
+double cloudPublishThreshold = 0.1; 	   // TODO: Make configurable
 
-bool switchState = true;
-int64_t switchStateTs;
+static struct desired_state desiredCfg = { 
+	.threshold = CONFIG_DEFAULT_THRESHOLD
+};
+
+static struct current_state currentState = {
+	.threshold = CONFIG_DEFAULT_THRESHOLD,
+	.switchState = true
+};
+
 uint16_t sensorErrorCount = 0;
 uint16_t maxSensorErrorCount = 3;
 
-#define MIN_VALID_TS 1500000000000
-
-bool reportedVersion = false;
-double reportedCurrentTemperature = -127;
-double reportedThreshold = -127;
-bool reportedSwitchState = false;
+static struct track_reported trackReported = {
+	.version = false,
+	.switchState = false,
+	.temperature = -127,
+	.threshold = -127,
+};
 
 static void button_handler(uint32_t button_states, uint32_t has_changed)
 {
 	bool triggerPublication = false;
 	if ((has_changed & button_states & DK_BTN1_MSK)) {
-		threshold = threshold - 1;
-		printf("Button - pressed: Threshold is now %d\n", (int)threshold);
+		currentState.threshold = currentState.threshold - 1;
+		printf("Button - pressed: Threshold is now %d\n", (int)currentState.threshold);
 		triggerPublication = true;
 	}
 	if ((has_changed & button_states & DK_BTN2_MSK)) {
-		threshold = threshold + 1;
-		printf("Button + pressed: Threshold is now %d\n", (int)threshold);
+		currentState.threshold = currentState.threshold + 1;
+		printf("Button + pressed: Threshold is now %d\n", (int)currentState.threshold);
 		triggerPublication = true;
 	}
 	if (triggerPublication) {
@@ -91,9 +96,9 @@ static void read_sensor_data_work_fn(struct k_work *work)
 		printf("Failed get binding for GPIO_0!\n");
 		return;
 	}
-	gpio_pin_configure(dev, RELAY_PIN, GPIO_OUTPUT);
+	gpio_pin_configure(dev, CONFIG_RELAY_PIN, GPIO_OUTPUT);
 
-	int dtError = date_time_now(&currentTemperatureTs);
+	int dtError = date_time_now(&currentState.temperatureTs);
 	if (dtError) {
 		printk("Failed to get current time: error %d\n", dtError);
 	}
@@ -104,8 +109,8 @@ static void read_sensor_data_work_fn(struct k_work *work)
 		sensorErrorCount += 1;
 		printf("Sensor fetch error count: %d\n", sensorErrorCount);
 		if (sensorErrorCount > maxSensorErrorCount) {
-			switchState = true; // Safety fallback
-			switchStateTs = currentTemperatureTs;
+			currentState.switchState = true; // Safety fallback
+			currentState.switchStateTs = currentState.temperatureTs;
 			printf("Safety fallback triggered.\n");
 		}
 	} else {
@@ -116,20 +121,20 @@ static void read_sensor_data_work_fn(struct k_work *work)
 		if (rc != 0) {
 			printf("get failed: %d\n", rc);
 		} else {
-			currentTemperature = sensor_value_to_double(&temperature);
+			currentState.temperature = sensor_value_to_double(&temperature);
 		}
-		if (currentTemperature < threshold) {
-			if (switchState) {
+		if (currentState.temperature < currentState.threshold) {
+			if (currentState.switchState) {
 				printf("Turning off...\n");
-				switchStateTs = currentTemperatureTs;
-				switchState = false;
+				currentState.switchStateTs = currentState.temperatureTs;
+				currentState.switchState = false;
 				triggerPublication = true;
 			}
 		} else {
-			if (!switchState) {
+			if (!currentState.switchState) {
 				printf("Turning on...\n");
-				switchStateTs = currentTemperatureTs;
-				switchState = true;
+				currentState.switchStateTs = currentState.temperatureTs;
+				currentState.switchState = true;
 				triggerPublication = true;
 			}
 		}
@@ -137,145 +142,21 @@ static void read_sensor_data_work_fn(struct k_work *work)
 			k_delayed_work_cancel(&report_state_work);
 			k_delayed_work_submit(&report_state_work, K_SECONDS(1));
 		}
-		printf("[%lld] Temp: %.1f | Threshold: %.1f | Switch: %s\n", currentTemperatureTs, currentTemperature, threshold, switchState ? "On" : "Off");
+		printf("[%lld] Temp: %.1f | Threshold: %.1f | Switch: %s\n", currentState.temperatureTs, currentState.temperature, currentState.threshold, currentState.switchState ? "On" : "Off");
 	}
-	dk_set_led(DK_LED1, (int)switchState); // LED1 status
-	gpio_pin_set(dev, RELAY_PIN, (int)(!switchState));
+	dk_set_led(DK_LED1, (int)currentState.switchState); // LED1 status
+	gpio_pin_set(dev, CONFIG_RELAY_PIN, (int)(!currentState.switchState));
 	dk_set_led(DK_LED2, 0); // LED2 off
 	// Schedule next read
 	k_delayed_work_submit(&read_sensor_data_work, K_SECONDS(sensorUpdateIntervalSeconds));
 }
 
-static int json_add_obj(cJSON *parent, const char *str, cJSON *object)
-{
-	cJSON_AddItemToObject(parent, str, object);
-
-	return 0;
-}
-
-static int json_add_str(cJSON *parent, const char *str, const char *value)
-{
-	cJSON *json_str = cJSON_CreateString(value);
-	if (json_str == NULL) {
-		return -ENOMEM;
-	}
-
-	return json_add_obj(parent, str, json_str);
-}
-
-static int json_add_number(cJSON *parent, const char *str, double value)
-{
-	cJSON *json_num = cJSON_CreateNumber(value);
-	if (json_num == NULL) {
-		return -ENOMEM;
-	}
-
-	return json_add_obj(parent, str, json_num);
-}
-
-static int json_add_boolean(cJSON *parent, const char *str, bool value)
-{
-	cJSON *b = value ? cJSON_CreateTrue() : cJSON_CreateFalse();
-	if (b == NULL) {
-		return -ENOMEM;
-	}
-
-	return json_add_obj(parent, str, b);
-}
-
-static int report_state()
-{
-	int err;
-	char *message;
-
-	cJSON *root_obj = cJSON_CreateObject();
-	cJSON *state_obj = cJSON_CreateObject();
-	cJSON *reported_obj = cJSON_CreateObject();
-
-	if (root_obj == NULL || state_obj == NULL || reported_obj == NULL) {
-		cJSON_Delete(root_obj);
-		cJSON_Delete(state_obj);
-		cJSON_Delete(reported_obj);
-		err = -ENOMEM;
-		return err;
-	}
-
-	err = 0;
-
-	if (!reportedVersion) {
-		err += json_add_str(reported_obj, "app_version", CONFIG_APP_VERSION);
-	}
-
-	bool pendingReportedSwitchState = switchState;
-	if (reportedSwitchState != pendingReportedSwitchState) {
-		err += json_add_boolean(reported_obj, "switchState", pendingReportedSwitchState);
-		if (switchStateTs > MIN_VALID_TS) {
-			err += json_add_number(reported_obj, "switchStateTs", switchStateTs);
-		}
-	}
-
-	double pendingReportedCurrentTemperature = currentTemperature;
-	if (reportedCurrentTemperature != pendingReportedCurrentTemperature) {
-		err += json_add_number(reported_obj, "temp", pendingReportedCurrentTemperature);
-		if (currentTemperatureTs > MIN_VALID_TS) {
-			err += json_add_number(reported_obj, "tempTs", currentTemperatureTs);
-		}
-	}
-
-	double pendingReportedThreshold = threshold;
-	if (reportedThreshold != pendingReportedThreshold) {
-		err += json_add_number(reported_obj, "threshold", pendingReportedThreshold);
-	}
-
-	err += json_add_obj(state_obj, "reported", reported_obj);
-	err += json_add_obj(root_obj, "state", state_obj);
-
-	if (err < 0) {
-		printk("json_add, error: %d\n", err);
-		goto cleanup;
-	}
-
-	message = cJSON_Print(root_obj);
-	if (message == NULL) {
-		printk("cJSON_Print, error: returned NULL\n");
-		err = -ENOMEM;
-		goto cleanup;
-	}
-
-	struct aws_iot_data tx_data = {
-		.qos = MQTT_QOS_0_AT_MOST_ONCE,
-		.topic.type = AWS_IOT_SHADOW_TOPIC_UPDATE,
-		.ptr = message,
-		.len = strlen(message)
-	};
-
-	printk("Publishing: %s to AWS IoT broker\n", message);
-
-	err = aws_iot_send(&tx_data);
-	if (err) {
-		printk("aws_iot_send, error: %d\n", err);
-	} else {
-		reportedVersion = true;
-		reportedSwitchState = pendingReportedSwitchState;
-		reportedCurrentTemperature = pendingReportedCurrentTemperature;
-		reportedThreshold = pendingReportedThreshold;
-	}
-
-	k_free(message);
-
-cleanup:
-
-	cJSON_Delete(root_obj);
-
-	return err;
-}
-
 static bool needsPublish() {
-	if (!reportedVersion) return true;
-	if (reportedSwitchState != switchState) return true;
-	if (reportedThreshold != threshold) return true;
-	if (reportedCurrentTemperature > currentTemperature && reportedCurrentTemperature - currentTemperature > cloudPublishThreshold) return true;
-	if (reportedCurrentTemperature < currentTemperature && currentTemperature - reportedCurrentTemperature > cloudPublishThreshold) return true;
+	if (!trackReported.version) return true;
+	if (trackReported.switchState != currentState.switchState) return true;
+	if (trackReported.threshold != currentState.threshold) return true;
+	if (trackReported.temperature > currentState.temperature && trackReported.temperature - currentState.temperature > cloudPublishThreshold) return true;
+	if (trackReported.temperature < currentState.temperature && currentState.temperature - trackReported.temperature > cloudPublishThreshold) return true;
 	return false;
 }
 
@@ -285,9 +166,9 @@ static void report_state_work_fn(struct k_work *work)
 		printk("No updates to report.\n");
 	} else {
 		int err;
-		err = report_state();
+		err = cloud_report_state(&currentState, &trackReported);
 		if (err) {
-			printk("report_state, error: %d\n", err);
+			printk("cloud_report_state, error: %d\n", err);
 		}
 	}
 
@@ -337,6 +218,17 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt)
 		break;
 	case AWS_IOT_EVT_DATA_RECEIVED:
 		printk("AWS_IOT_EVT_DATA_RECEIVED\n");
+		err = cloud_decode_response(evt->data.msg.ptr, &desiredCfg);
+		if (err) {
+			printk("Could not decode response %d", err);
+		}
+		if (desiredCfg.threshold != currentState.threshold) {
+	        printk("New threshold: %d\n", (int)desiredCfg.threshold);
+			currentState.threshold = desiredCfg.threshold;
+			// Sensor read might cancel this, but if not, schedule report of new threshold
+			k_delayed_work_cancel(&report_state_work);
+			k_delayed_work_submit(&report_state_work, K_SECONDS(5));
+		}
 		break;
 	case AWS_IOT_EVT_FOTA_START:
 		printk("AWS_IOT_EVT_FOTA_START\n");
@@ -492,7 +384,8 @@ void main(void) {
 	printf("Version:                   %s\n", CONFIG_APP_VERSION);
 	printf("Temperature read interval: %d seconds\n", sensorUpdateIntervalSeconds);
 	printf("Max sensor read error:     %d\n", maxSensorErrorCount);
-	printf("Temperature threshold:     %d degree\n", (int)threshold);
+	printf("Temperature threshold:     %d degree\n", (int)currentState.threshold);
+	printf("Relay on pin:              %d\n", CONFIG_RELAY_PIN);
 	printf("AWS IoT Client ID:         %s\n", CONFIG_AWS_IOT_CLIENT_ID_STATIC);
 	printf("AWS IoT broker hostname:   %s\n", CONFIG_AWS_IOT_BROKER_HOST_NAME);
 	printf("Publish min interval:      %d seconds\n", cloudPublishIntervalSeconds);
