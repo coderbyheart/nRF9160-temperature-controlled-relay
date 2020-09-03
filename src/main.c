@@ -34,7 +34,8 @@ K_SEM_DEFINE(lte_connected, 0, 1);
 
 uint16_t sensorUpdateIntervalSeconds = 10; // TODO: Make configurable
 uint16_t cloudPublishIntervalSeconds = 60; // TODO: Make configurable
-double cloudPublishThreshold = 0.1; 	   // TODO: Make configurable
+double cloudPublishTempDelta = 0.5;        // TODO: Make configurable
+double tempDelta = 0.2; 	               // TODO: Make configurable
 
 static struct desired_state desiredCfg = { 
 	.threshold = CONFIG_DEFAULT_THRESHOLD
@@ -55,6 +56,8 @@ static struct track_reported trackReported = {
 	.threshold = -127,
 };
 
+bool isConnected = false;
+
 static void button_handler(uint32_t button_states, uint32_t has_changed)
 {
 	bool triggerPublication = false;
@@ -74,7 +77,7 @@ static void button_handler(uint32_t button_states, uint32_t has_changed)
 		k_delayed_work_submit(&read_sensor_data_work, K_SECONDS(1));
 		// Sensor read might cancel this, but if not, schedule report of new threshold
 		k_delayed_work_cancel(&report_state_work);
-		k_delayed_work_submit(&report_state_work, K_SECONDS(5));
+		k_delayed_work_submit(&report_state_work, K_SECONDS(sensorUpdateIntervalSeconds * 2));
 	}
 }
 
@@ -123,14 +126,15 @@ static void read_sensor_data_work_fn(struct k_work *work)
 		} else {
 			currentState.temperature = sensor_value_to_double(&temperature);
 		}
-		if (currentState.temperature < currentState.threshold) {
+		// This enables the switch to stay in one state in case the temperature floats around a value 
+		if (currentState.threshold - currentState.temperature >= tempDelta) {
 			if (currentState.switchState) {
 				printf("Turning off...\n");
 				currentState.switchStateTs = currentState.temperatureTs;
 				currentState.switchState = false;
 				triggerPublication = true;
 			}
-		} else {
+		} else if ( currentState.temperature - currentState.threshold >= tempDelta) {
 			if (!currentState.switchState) {
 				printf("Turning on...\n");
 				currentState.switchStateTs = currentState.temperatureTs;
@@ -142,7 +146,13 @@ static void read_sensor_data_work_fn(struct k_work *work)
 			k_delayed_work_cancel(&report_state_work);
 			k_delayed_work_submit(&report_state_work, K_SECONDS(1));
 		}
-		printf("[%lld] Temp: %.1f | Threshold: %.1f | Switch: %s\n", currentState.temperatureTs, currentState.temperature, currentState.threshold, currentState.switchState ? "On" : "Off");
+		printf(
+			"[%lld] Temp: %.1f | Threshold: %.1f (+/-%.1f) | Switch: %s\n", 
+			currentState.temperatureTs, 
+			currentState.temperature, 
+			currentState.threshold,
+			tempDelta,
+			currentState.switchState ? "On" : "Off");
 	}
 	dk_set_led(DK_LED1, (int)currentState.switchState); // LED1 status
 	gpio_pin_set(dev, CONFIG_RELAY_PIN, (int)(!currentState.switchState));
@@ -155,8 +165,8 @@ static bool needsPublish() {
 	if (!trackReported.version) return true;
 	if (trackReported.switchState != currentState.switchState) return true;
 	if (trackReported.threshold != currentState.threshold) return true;
-	if (trackReported.temperature > currentState.temperature && trackReported.temperature - currentState.temperature > cloudPublishThreshold) return true;
-	if (trackReported.temperature < currentState.temperature && currentState.temperature - trackReported.temperature > cloudPublishThreshold) return true;
+	if (trackReported.temperature > currentState.temperature && trackReported.temperature - currentState.temperature > cloudPublishTempDelta) return true;
+	if (trackReported.temperature < currentState.temperature && currentState.temperature - trackReported.temperature > cloudPublishTempDelta) return true;
 	return false;
 }
 
@@ -164,6 +174,8 @@ static void report_state_work_fn(struct k_work *work)
 {
 	if (!needsPublish()) {
 		printk("No updates to report.\n");
+	} else if(!isConnected) {
+		printk("Not connected to AWS IoT.\n");
 	} else {
 		int err;
 		err = cloud_report_state(&currentState, &trackReported);
@@ -187,6 +199,7 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt)
 	case AWS_IOT_EVT_CONNECTED:
 		printf("Connected to AWS IoT.\n");
 		dk_set_led(DK_LED3, 1); // LED3 on while connected
+		isConnected = true;
 
 		if (evt->data.persistent_session) {
 			printk("Persistent session enabled\n");
@@ -206,7 +219,6 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt)
 		if (err) {
 			printk("Requesting PSM failed, error: %d\n", err);
 		}
-
 		break;
 	case AWS_IOT_EVT_READY:
 		// Ignore
@@ -215,6 +227,7 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt)
 		printf("Disconnected from AWS IoT.\n");
 		k_delayed_work_cancel(&report_state_work);
 		dk_set_led(DK_LED3, 0); // LED3 off while connected
+		isConnected = false;
 		break;
 	case AWS_IOT_EVT_DATA_RECEIVED:
 		printk("AWS_IOT_EVT_DATA_RECEIVED\n");
@@ -227,7 +240,7 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt)
 			currentState.threshold = desiredCfg.threshold;
 			// Sensor read might cancel this, but if not, schedule report of new threshold
 			k_delayed_work_cancel(&report_state_work);
-			k_delayed_work_submit(&report_state_work, K_SECONDS(5));
+			k_delayed_work_submit(&report_state_work, K_SECONDS(sensorUpdateIntervalSeconds * 2));
 		}
 		break;
 	case AWS_IOT_EVT_FOTA_START:
@@ -385,11 +398,12 @@ void main(void) {
 	printf("Temperature read interval: %d seconds\n", sensorUpdateIntervalSeconds);
 	printf("Max sensor read error:     %d\n", maxSensorErrorCount);
 	printf("Temperature threshold:     %d degree\n", (int)currentState.threshold);
+	printf("Temperature delta:         %.1f degree\n", tempDelta);
 	printf("Relay on pin:              %d\n", CONFIG_RELAY_PIN);
 	printf("AWS IoT Client ID:         %s\n", CONFIG_AWS_IOT_CLIENT_ID_STATIC);
 	printf("AWS IoT broker hostname:   %s\n", CONFIG_AWS_IOT_BROKER_HOST_NAME);
 	printf("Publish min interval:      %d seconds\n", cloudPublishIntervalSeconds);
-	printf("Publish threshold:         %.1f degree\n", cloudPublishThreshold);
+	printf("Publish temperature delta: %.1f degree\n", cloudPublishTempDelta);
 	printf("##########################################################################################\n");
 
 	cJSON_Init();
