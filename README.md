@@ -9,6 +9,13 @@ This implements a temperature controlled relay using the nRF9160 DK:
 - read threshold from cloud
 - (TODO) override cloud threshold on button press
 
+## LED patterns
+
+- `LED1`: shows relay switch state. On: relay is switched on, Off: relay is switched off
+- `LED2`: on (very shortly) during sensor read
+- `LED3`: signals cloud connectivity state. On: connected, Off: false
+- `LED4`: not used
+
 ## Building
 
 ### Prepare the Docker image with all build dependencies
