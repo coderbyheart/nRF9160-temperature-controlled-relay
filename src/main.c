@@ -171,8 +171,8 @@ static bool needsPublish() {
 	if (trackReported.publishVersion) return true;
 	if (trackReported.switchState != currentState.switchState) return true;
 	if (trackReported.threshold != currentState.threshold) return true;
-	if (trackReported.temperature > currentState.temperature && trackReported.temperature - currentState.temperature > cloudPublishTempDelta) return true;
-	if (trackReported.temperature < currentState.temperature && currentState.temperature - trackReported.temperature > cloudPublishTempDelta) return true;
+	if (trackReported.temperature > currentState.temperature && trackReported.temperature - currentState.temperature >= cloudPublishTempDelta) return true;
+	if (trackReported.temperature < currentState.temperature && currentState.temperature - trackReported.temperature >= cloudPublishTempDelta) return true;
 	if (trackDesired.overrideThreshold) return true;
 	return false;
 }
