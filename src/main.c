@@ -50,7 +50,7 @@ uint16_t sensorErrorCount = 0;
 uint16_t maxSensorErrorCount = 3;
 
 static struct track_reported trackReported = {
-	.version = false,
+	.publishVersion = true,
 	.switchState = false,
 	.temperature = -127,
 	.threshold = -127,
@@ -168,7 +168,7 @@ static void read_sensor_data_work_fn(struct k_work *work)
 }
 
 static bool needsPublish() {
-	if (!trackReported.version) return true;
+	if (trackReported.publishVersion) return true;
 	if (trackReported.switchState != currentState.switchState) return true;
 	if (trackReported.threshold != currentState.threshold) return true;
 	if (trackReported.temperature > currentState.temperature && trackReported.temperature - currentState.temperature > cloudPublishTempDelta) return true;

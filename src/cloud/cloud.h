@@ -22,7 +22,7 @@ struct desired_state {
 };
 
 struct track_reported {
-	bool version; // Simple one time check for reported version
+	bool publishVersion; // Simple one time check for reported version
 	bool switchState;
 	double temperature;
 	double threshold;

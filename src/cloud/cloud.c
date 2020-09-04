@@ -112,7 +112,7 @@ int cloud_report_state(
 
 	err = 0;
 
-	if (!trackReported->version) {
+	if (trackReported->publishVersion) {
 		err += json_add_str(reported_obj, "app_version", CONFIG_APP_VERSION);
 	}
 
@@ -171,7 +171,7 @@ int cloud_report_state(
 	if (err) {
 		printk("aws_iot_send, error: %d\n", err);
 	} else {
-		trackReported->version = true;
+		trackReported->publishVersion = false;
 		trackReported->switchState = prendingReportedSwitch;
 		trackReported->temperature = pendingReportedCurrentTemperature;
 		trackReported->threshold = pendingReportedThreshold;
