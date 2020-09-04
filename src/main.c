@@ -35,7 +35,7 @@ K_SEM_DEFINE(lte_connected, 0, 1);
 uint16_t sensorUpdateIntervalSeconds = 10; // TODO: Make configurable
 uint16_t cloudPublishIntervalSeconds = 60; // TODO: Make configurable
 double cloudPublishTempDelta = 0.5;        // TODO: Make configurable
-double tempDelta = 0.2; 	               // TODO: Make configurable
+double tempDelta = 0.1; 	               // TODO: Make configurable
 
 static struct desired_state desiredCfg = { 
 	.threshold = CONFIG_DEFAULT_THRESHOLD
