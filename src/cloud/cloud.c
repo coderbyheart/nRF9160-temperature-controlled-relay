@@ -88,7 +88,10 @@ exit:
 	return 0;
 }
 
-int cloud_report_state(struct current_state *currentState, struct track_reported *trackReported)
+int cloud_report_state(
+	struct current_state *currentState, 
+	struct track_reported *trackReported,
+	struct track_desired *trackDesired)
 {
 	int err;
 	char *message;
@@ -96,11 +99,13 @@ int cloud_report_state(struct current_state *currentState, struct track_reported
 	cJSON *root_obj = cJSON_CreateObject();
 	cJSON *state_obj = cJSON_CreateObject();
 	cJSON *reported_obj = cJSON_CreateObject();
+	cJSON *desired_obj = cJSON_CreateObject();
 
-	if (root_obj == NULL || state_obj == NULL || reported_obj == NULL) {
+	if (root_obj == NULL || state_obj == NULL || reported_obj == NULL || desired_obj == NULL) {
 		cJSON_Delete(root_obj);
 		cJSON_Delete(state_obj);
 		cJSON_Delete(reported_obj);
+		cJSON_Delete(desired_obj);
 		err = -ENOMEM;
 		return err;
 	}
@@ -133,6 +138,12 @@ int cloud_report_state(struct current_state *currentState, struct track_reported
 	}
 
 	err += json_add_obj(state_obj, "reported", reported_obj);
+
+	if (trackDesired->overrideThreshold) {
+		err += json_add_number(desired_obj, "threshold", pendingReportedThreshold);
+		err += json_add_obj(state_obj, "desired", desired_obj);
+	}
+
 	err += json_add_obj(root_obj, "state", state_obj);
 
 	if (err < 0) {
@@ -164,6 +175,7 @@ int cloud_report_state(struct current_state *currentState, struct track_reported
 		trackReported->switchState = prendingReportedSwitch;
 		trackReported->temperature = pendingReportedCurrentTemperature;
 		trackReported->threshold = pendingReportedThreshold;
+		trackDesired->overrideThreshold = false;
 	}
 
 	k_free(message);

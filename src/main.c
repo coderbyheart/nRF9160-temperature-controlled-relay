@@ -56,6 +56,10 @@ static struct track_reported trackReported = {
 	.threshold = -127,
 };
 
+static struct track_desired trackDesired = {
+	.overrideThreshold = false // Initially do not override desired threshold
+};
+
 bool isConnected = false;
 
 static void button_handler(uint32_t button_states, uint32_t has_changed)
@@ -63,11 +67,13 @@ static void button_handler(uint32_t button_states, uint32_t has_changed)
 	bool triggerPublication = false;
 	if ((has_changed & button_states & DK_BTN1_MSK)) {
 		currentState.threshold = currentState.threshold - 1;
+		trackDesired.overrideThreshold = true;
 		printf("Button - pressed: Threshold is now %d\n", (int)currentState.threshold);
 		triggerPublication = true;
 	}
 	if ((has_changed & button_states & DK_BTN2_MSK)) {
 		currentState.threshold = currentState.threshold + 1;
+		trackDesired.overrideThreshold = true;
 		printf("Button + pressed: Threshold is now %d\n", (int)currentState.threshold);
 		triggerPublication = true;
 	}
@@ -167,6 +173,7 @@ static bool needsPublish() {
 	if (trackReported.threshold != currentState.threshold) return true;
 	if (trackReported.temperature > currentState.temperature && trackReported.temperature - currentState.temperature > cloudPublishTempDelta) return true;
 	if (trackReported.temperature < currentState.temperature && currentState.temperature - trackReported.temperature > cloudPublishTempDelta) return true;
+	if (trackDesired.overrideThreshold) return true;
 	return false;
 }
 
@@ -178,7 +185,7 @@ static void report_state_work_fn(struct k_work *work)
 		printk("Not connected to AWS IoT.\n");
 	} else {
 		int err;
-		err = cloud_report_state(&currentState, &trackReported);
+		err = cloud_report_state(&currentState, &trackReported, &trackDesired);
 		if (err) {
 			printk("cloud_report_state, error: %d\n", err);
 		}

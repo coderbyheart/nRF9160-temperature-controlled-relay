@@ -28,8 +28,15 @@ struct track_reported {
 	double threshold;
 };
 
+struct track_desired {
+	bool overrideThreshold; // Simple switch whether to override the desired property
+};
+
 int cloud_decode_response(char *input, struct desired_state *cfg);
-int cloud_report_state(struct current_state *currentState, struct track_reported *trackReported);
+int cloud_report_state(
+	struct current_state *currentState, 
+	struct track_reported *trackReported,
+	struct track_desired *trackDesired);
 
 #ifdef __cplusplus
 }
