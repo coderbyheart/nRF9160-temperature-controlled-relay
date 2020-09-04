@@ -217,18 +217,17 @@ void aws_iot_event_handler(const struct aws_iot_evt *const evt)
 		 */
 		boot_write_img_confirmed();
 
-		/** Send version number to AWS IoT broker to verify that the
-		 *  FOTA update worked.
-		 */
-		k_delayed_work_submit(&report_state_work, K_NO_WAIT);
-
 		err = lte_lc_psm_req(true);
 		if (err) {
 			printk("Requesting PSM failed, error: %d\n", err);
 		}
 		break;
 	case AWS_IOT_EVT_READY:
-		// Ignore
+		printf("Subscribed to all topics.\n");
+		/** Send version number to AWS IoT broker to verify that the
+		 *  FOTA update worked.
+		 */
+		k_delayed_work_submit(&report_state_work, K_NO_WAIT);
 		break;
 	case AWS_IOT_EVT_DISCONNECTED:
 		printf("Disconnected from AWS IoT.\n");
