@@ -6,7 +6,8 @@ This implements a temperature controlled relay using the nRF9160 DK:
 - a relay is switched on, if the temperature is below a threshold
 - the threshold can be increased/decreased by pressing button 2/1
 - it publishes the temperature to the cloud
-- (TODO) read threshold from cloud
+- read threshold from cloud
+- (TODO) override cloud threshold on button press
 
 ## Building
 
