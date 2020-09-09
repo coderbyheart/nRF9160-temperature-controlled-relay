@@ -24,11 +24,13 @@
 #include <modem/at_notif.h>
 #include <modem/modem_info.h>
 #include <bsd.h>
+#include <modem/at_cmd.h>
 
 #include "cloud.h"
 
 static struct k_delayed_work read_sensor_data_work;
 static struct k_delayed_work report_state_work;
+static struct k_delayed_work connstat_work;
 
 K_SEM_DEFINE(lte_connected, 0, 1);
 
@@ -61,6 +63,8 @@ static struct track_desired trackDesired = {
 };
 
 bool isConnected = false;
+
+static uint8_t connStatBuffer[64];
 
 static void button_handler(uint32_t button_states, uint32_t has_changed)
 {
@@ -375,11 +379,61 @@ static void bsd_lib_modem_dfu_handler(void)
 	at_configure();
 }
 
+static int remove_whitespace(char *buf)
+{
+	size_t i, j = 0, len;
+
+	len = strlen(buf);
+	for (i = 0; i < len; i++) {
+		if (buf[i] >= 32 && buf[i] <= 126) {
+			if (j != i) {
+				buf[j] = buf[i];
+			}
+
+			j++;
+		}
+	}
+
+	if (j < len) {
+		buf[j] = '\0';
+	}
+
+	return 0;
+}
+
+static int query_modem(const char *cmd, char *buf, size_t buf_len)
+{
+	int ret;
+	enum at_cmd_state at_state;
+
+	ret = at_cmd_write(cmd, buf, buf_len, &at_state);
+	if (ret) {
+		printk("at_cmd_write [%s] error:%d, at_state: %d\n",
+			cmd, ret, at_state);
+		strncpy(buf, "error", buf_len);
+		return ret;
+	}
+
+	remove_whitespace(buf);
+	return 0;
+}
+
+static void connstat_work_fn(struct k_work *work)
+{
+	query_modem("AT%XCONNSTAT?", connStatBuffer, sizeof(connStatBuffer));
+	// NOTE: k_uptime_get_32() cannot hold a system uptime time larger than approximately 50 days
+	printk("Connection stats: %s | Uptime: %d seconds\n", connStatBuffer, k_uptime_get_32() / 1000);
+	// Schedule next run
+	k_delayed_work_submit(&connstat_work, K_SECONDS(60));
+}
+
 static void work_init(void)
 {
 	k_delayed_work_init(&read_sensor_data_work, read_sensor_data_work_fn);
 	k_delayed_work_submit(&read_sensor_data_work, K_SECONDS(15));
 	k_delayed_work_init(&report_state_work, report_state_work_fn);
+	k_delayed_work_init(&connstat_work, connstat_work_fn);
+	k_delayed_work_submit(&connstat_work, K_SECONDS(60));
 }
 
 void main(void) {
@@ -415,6 +469,11 @@ void main(void) {
 	cJSON_Init();
 
 	bsd_lib_modem_dfu_handler();
+
+	err = at_cmd_write("AT%XCONNSTAT=1", NULL, 0, NULL);
+	if (err != 0) {
+		printk("Could not enable connection statistics, error: %d\n", err);
+	}
 
 	work_init();
 
