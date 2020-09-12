@@ -18,11 +18,11 @@ config RELAY_PIN
 	int "PIN where relay is connected"
 	default 17
 
-endmenu # Firmware versioning
+endmenu # Temperature controlled relay
 
 menu "Zephyr Kernel"
 source "$ZEPHYR_BASE/Kconfig.zephyr"
 endmenu
 
-module = TRC
+module = TCR
 module-str = Temperature controlled relay
